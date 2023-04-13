@@ -59,10 +59,13 @@ Find this project on:
 
 ```shell
 meta git clone git@github.com:rubocop-lts/meta.git
-meta git update
+meta exec "git fetch"
+meta exec "git checkout main"
 ```
 
-See how the commands are prefixed with `meta`?  That's pretty much all you need to know.
+See how the last two commands are prefixed with `meta exec` followed by a quoted command?
+That's pretty much all you need to know.
+The first command is special, in that it prepares each project to be checked out.
 
 ### 🧸 Add New Sub Project
 
