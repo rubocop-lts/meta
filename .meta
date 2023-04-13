@@ -11,6 +11,7 @@
     "rubocop-ruby2_6": "git@gitlab.com:rubocop-lts/rubocop-ruby2_6.git",
     "rubocop-ruby2_7": "git@gitlab.com:rubocop-lts/rubocop-ruby2_7.git",
     "rubocop-ruby3_0": "git@gitlab.com:rubocop-lts/rubocop-ruby3_0.git",
-    "rubocop-ruby3_1": "git@gitlab.com:rubocop-lts/rubocop-ruby3_1.git"
+    "rubocop-ruby3_1": "git@gitlab.com:rubocop-lts/rubocop-ruby3_1.git",
+    "rubocop-lts.gitlab.io": "git@gitlab.com:rubocop-lts/rubocop-lts.gitlab.io.git"
   }
 }
