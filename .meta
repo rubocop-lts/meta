@@ -1,3 +1,5 @@
 {
-  "projects": {}
+  "projects": {
+    "rubocop-lts": "git@gitlab.com:rubocop-lts/rubocop-lts.git"
+  }
 }
