@@ -1,13 +1,28 @@
-/rubocop-lts/
-/rubocop-ruby1_9/
-/rubocop-ruby2_0/
-/rubocop-ruby2_1/
-/rubocop-ruby2_2/
-/rubocop-ruby2_3/
-/rubocop-ruby2_4/
-/rubocop-ruby2_5/
-/rubocop-ruby2_6/
-/rubocop-ruby2_7/
-/rubocop-ruby3_0/
-/rubocop-ruby3_1/
-/rubocop-lts.gitlab.io/
+/.bundle/
+/.yardoc
+/_yardoc/
+/coverage/
+/results/
+/doc/
+/pkg/
+/spec/reports/
+/tmp/
+
+# Packaging artifacts
+*.gem
+
+# IDEs
+/.idea/
+*.kate-swp
+
+# rspec failure tracking
+.rspec_status
+
+# Gemfile Lock files
+gemfiles/*.lock
+
+# Debugging
+.byebug_history
+
+# direnv - brew install direnv
+.env.local
