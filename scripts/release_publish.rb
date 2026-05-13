@@ -61,6 +61,7 @@ options = {
   tag: false,
   require_tags: false,
   include_main: false,
+  bundle_install: true,
   skip_tests: false,
   execute: false
 }
@@ -98,6 +99,10 @@ OptionParser.new do |opts|
 
   opts.on("--json FILE", "Use an existing bump-plan JSON file instead of regenerating #{DEFAULT_BUMP_PLAN_JSON}") do |file|
     options[:json_path] = Pathname.new(File.expand_path(file))
+  end
+
+  opts.on("--[no-]bundle-install", "Run bundle install before tests/build/release (default: enabled)") do |value|
+    options[:bundle_install] = value
   end
 
   opts.on("--skip-tests", "Skip bundle exec rake spec") do
@@ -166,6 +171,14 @@ def run_with_auth!(cmd, chdir:, signing_key_passphrase:)
 
     _pid, status = Process.wait2(pid)
     raise "Command failed: #{sh(cmd)}" unless status.success?
+  end
+end
+
+def run_or_echo!(cmd, chdir:, execute:)
+  if execute
+    run!(cmd, chdir: chdir)
+  else
+    puts "DRY-RUN: #{sh(cmd)}"
   end
 end
 
@@ -339,6 +352,7 @@ end
 puts "release_publish workspace=#{WORKSPACE_DIR}"
 puts "bump_plan_json=#{bump_plan_json_path}"
 puts "mode=#{options[:execute] ? (options[:push] ? "execute+push" : "execute+build") : "dry-run"}"
+puts "bundle_install=#{options[:bundle_install]}"
 puts "queue=#{release_queue.map { |target| target_key(target) }.join(", ")}"
 
 release_queue.map { |target| target.fetch(:repo) }.uniq.each { |repo| ensure_clean_git!(repo) }
@@ -375,6 +389,11 @@ begin
       checkout_ref!(repo, target.fetch(:ref), execute: options[:execute])
     end
 
+    if options[:bundle_install]
+      # Ensure git/path sources in Gemfile/Gemfile.lock are resolved before rake tasks.
+      run_or_echo!(["bundle", "install"], chdir: repo_dir, execute: options[:execute])
+    end
+
     if options[:push] && rubygems_version_released?(gem_name, version)
       puts "Skipping #{gem_name} #{version}; already released on RubyGems."
       next
@@ -386,7 +405,7 @@ begin
       spec_dir = repo_dir.join("spec")
       if spec_dir.exist?
         cmd = ["bundle", "exec", "rake", "spec"]
-        options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
+        run_or_echo!(cmd, chdir: repo_dir, execute: options[:execute])
       else
         puts "No spec directory in #{target_name}; skipping tests"
       end
@@ -398,11 +417,11 @@ begin
         run_with_auth!(cmd, chdir: repo_dir, signing_key_passphrase: signing_key_passphrase)
         run!(["gem", "info", gem_name, "--remote", "-v", version], chdir: repo_dir)
       else
-        puts "DRY-RUN: #{sh(cmd)}"
+        run_or_echo!(cmd, chdir: repo_dir, execute: false)
       end
     else
       cmd = ["bundle", "exec", "rake", "build"]
-      options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
+      run_or_echo!(cmd, chdir: repo_dir, execute: options[:execute])
     end
 
     next unless options[:tag]
@@ -412,7 +431,7 @@ begin
       out: File::NULL, err: File::NULL)
     unless tag_exists
       cmd = ["git", "tag", "-a", tag_name, "-m", "Release #{target_name} #{version}"]
-      options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
+      run_or_echo!(cmd, chdir: repo_dir, execute: options[:execute])
     end
 
     next unless options[:push_git]
