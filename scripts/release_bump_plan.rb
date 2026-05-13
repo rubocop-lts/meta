@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "open3"
+require "json"
 require "pathname"
 require "rubygems"
 
@@ -48,17 +49,21 @@ BUMP_RANK = { "none" => 0, "patch" => 1, "minor" => 2, "major" => 3 }.freeze
 
 def parse_args(argv)
   require_tags = REQUIRE_TAGS_DEFAULT
+  json_output = false
 
   argv.each do |arg|
     case arg
     when "--require-tags"
       require_tags = true
+    when "--json"
+      json_output = true
     when "-h", "--help"
       puts <<~USAGE
         Usage: release_bump_plan.rb [options]
 
         Options:
           --require-tags   Enforce tag-dependent checks as failures
+          --json           Emit machine-readable JSON output
           -h, --help       Show this help
 
         Environment:
@@ -72,7 +77,7 @@ def parse_args(argv)
     end
   end
 
-  require_tags
+  { require_tags: require_tags, json_output: json_output }
 end
 
 RepoReport = Struct.new(
@@ -183,6 +188,13 @@ def sorted_tags(repo_dir)
 end
 
 
+def sorted_tags_for_ref(repo_dir, ref)
+  run_cmd("git", "--no-pager", "tag", "--merged", ref, "--list", "v*", chdir: repo_dir)
+    .lines.map(&:strip).reject(&:empty?)
+    .sort_by { |tag| Gem::Version.new(tag.delete_prefix("v")) }
+end
+
+
 def build_repo_report(repo)
   repo_dir = WORKSPACE_DIR.join(repo)
   tags = sorted_tags(repo_dir)
@@ -283,16 +295,14 @@ def branch_bump_required(reasons)
   reasons.empty? ? "patch" : "minor"
 end
 
-require_tags = parse_args(ARGV)
+args = parse_args(ARGV)
+require_tags = args.fetch(:require_tags)
+json_output = args.fetch(:json_output)
 
 reports = REPOS.to_h { |repo| [repo, build_repo_report(repo)] }
 
-puts "release_bump_plan workspace=#{WORKSPACE_DIR}"
-puts "require_tags=#{require_tags}"
-puts
-puts "Latest release policy audit (previous tag -> latest tag)"
-puts "repo|previous|latest|required|actual|status|reason"
 release_failures = 0
+release_rows = []
 
 reports.each_value do |report|
   status = "ok"
@@ -303,21 +313,20 @@ reports.each_value do |report|
     release_failures += 1 if require_tags
   end
 
-  puts [
-    report.repo,
-    report.previous_tag || "-",
-    report.latest_tag || "-",
-    report.latest_release_required_bump,
-    report.latest_release_actual_bump,
-    status,
-    reason.empty? ? "-" : reason
-  ].join("|")
+  release_rows << {
+    repo: report.repo,
+    previous_tag: report.previous_tag || "-",
+    latest_tag: report.latest_tag || "-",
+    required: report.latest_release_required_bump,
+    actual: report.latest_release_actual_bump,
+    status: status,
+    reason: reason.empty? ? "-" : reason
+  }
+
 end
 
-puts
-puts "Repo bump audit"
-puts "repo|tag|head|commits|required|actual|status|reason"
 repo_failures = 0
+repo_rows = []
 
 reports.each_value do |report|
   status = "ok"
@@ -328,50 +337,64 @@ reports.each_value do |report|
     repo_failures += 1
   end
 
-  puts [
-    report.repo,
-    report.latest_tag || "-",
-    report.head_version,
-    report.commits_since_tag,
-    report.required_bump,
-    report.actual_bump,
-    status,
-    reason.empty? ? "-" : reason
-  ].join("|")
+  repo_rows << {
+    repo: report.repo,
+    tag: report.latest_tag || "-",
+    head: report.head_version,
+    commits: report.commits_since_tag,
+    required: report.required_bump,
+    actual: report.actual_bump,
+    status: status,
+    reason: reason.empty? ? "-" : reason
+  }
+
 end
 
-puts
-puts "rubocop-lts branch dependency/bump audit"
-puts "branch|wrapper|required|actual|status|details"
 branch_failures = 0
+branch_rows = []
 
 lts_dir = WORKSPACE_DIR.join("rubocop-lts")
 
 RUBOCOP_LTS_BRANCHES.each do |branch, wrapper_repo|
   _stdout, _stderr, exists = safe_cmd("git", "rev-parse", "--verify", branch, chdir: lts_dir)
   unless exists
-    puts [branch, wrapper_repo, "-", "-", "FAIL", "missing local branch"].join("|")
+    branch_rows << {
+      branch: branch,
+      wrapper: wrapper_repo,
+      required: "-",
+      actual: "-",
+      status: "FAIL",
+      details: "missing local branch"
+    }
+
+    puts [branch, wrapper_repo, "-", "-", "FAIL", "missing local branch"].join("|") unless json_output
     branch_failures += 1
     next
   end
 
   head_version = parse_version_rb(run_cmd("git", "show", "#{branch}:lib/rubocop/lts/version.rb", chdir: lts_dir))
-  tag = "v#{head_version}"
+  head_tag = "v#{head_version}"
   branch_gemspec = run_cmd("git", "show", "#{branch}:rubocop-lts.gemspec", chdir: lts_dir)
+  branch_tags = sorted_tags_for_ref(lts_dir, branch)
+  latest_branch_tag = branch_tags.last
+  latest_branch_version = latest_branch_tag&.delete_prefix("v")
 
-  _tag_stdout, _tag_stderr, tag_exists = safe_cmd("git", "rev-parse", "--verify", tag, chdir: lts_dir)
-  commits_since = 0
-  tag_gemspec = ""
-  unless tag_exists
-    if require_tags
-      puts [branch, wrapper_repo, "-", "-", "FAIL", "missing tag #{tag}"].join("|")
-      branch_failures += 1
-      next
-    end
-  else
-    commits_since = run_cmd("git", "rev-list", "--count", "#{tag}..#{branch}", chdir: lts_dir).strip.to_i
-    tag_gemspec = run_cmd("git", "show", "#{tag}:rubocop-lts.gemspec", chdir: lts_dir)
-  end
+  _tag_stdout, _tag_stderr, head_tag_exists = safe_cmd("git", "rev-parse", "--verify", head_tag, chdir: lts_dir)
+  commits_since = if latest_branch_tag
+                    run_cmd("git", "rev-list", "--count", "#{latest_branch_tag}..#{branch}", chdir: lts_dir).strip.to_i
+                  else
+                    0
+                  end
+  commits_past_head_tag = if head_tag_exists
+                            run_cmd("git", "rev-list", "--count", "#{head_tag}..#{branch}", chdir: lts_dir).strip.to_i
+                          else
+                            0
+                          end
+  tag_gemspec = if latest_branch_tag
+                  run_cmd("git", "show", "#{latest_branch_tag}:rubocop-lts.gemspec", chdir: lts_dir)
+                else
+                  ""
+                end
 
   old_floor = parse_required_ruby_min(tag_gemspec)
   new_floor = parse_required_ruby_min(branch_gemspec)
@@ -401,40 +424,83 @@ RUBOCOP_LTS_BRANCHES.each do |branch, wrapper_repo|
   reasons << "#{wrapper_repo} dep should target >= #{wrapper_plan_major}.0.0, < #{wrapper_plan_major + 1}" if dep_major_mismatch
 
   required_bump = branch_bump_required(reasons)
-  actual_bump = semver_bump(head_version, head_version)
+  actual_bump = latest_branch_version ? semver_bump(latest_branch_version, head_version) : "none"
   status = "ok"
 
-  unless tag_exists
-    status = "WARN"
-    reasons << "missing tag #{tag} (advisory without --require-tags)"
+  unless head_tag_exists
+    status = require_tags ? "FAIL" : "WARN"
+    reasons << "missing tag #{head_tag}#{require_tags ? "" : " (advisory without --require-tags)"}"
+    branch_failures += 1 if require_tags
   end
 
-  if commits_since > 0
-    if required_bump == "minor"
-      status = require_tags ? "FAIL" : "WARN"
-      branch_failures += 1 if require_tags
-      actual_bump = "none"
-    elsif dep_major_mismatch
-      status = "FAIL"
-      branch_failures += 1
-    end
-  elsif dep_major_mismatch
+  if head_tag_exists && commits_past_head_tag > 0
+    status = require_tags ? "FAIL" : "WARN"
+    reasons << "#{commits_past_head_tag} commit(s) past #{head_tag}#{require_tags ? "" : " (advisory without --require-tags)"}"
+    branch_failures += 1 if require_tags
+  end
+
+  if dep_major_mismatch
     status = "FAIL"
     branch_failures += 1
   end
 
-  puts [
-    branch,
-    wrapper_repo,
-    required_bump,
-    actual_bump,
-    status,
-    reasons.empty? ? "-" : reasons.join("; ")
-  ].join("|")
+  if commits_since > 0 && BUMP_RANK.fetch(actual_bump) < BUMP_RANK.fetch(required_bump)
+    status = "FAIL"
+    reasons << "version bump too small for pending branch changes"
+    branch_failures += 1
+  end
+
+  branch_rows << {
+    branch: branch,
+    wrapper: wrapper_repo,
+    required: required_bump,
+    actual: actual_bump,
+    status: status,
+    details: reasons.empty? ? "-" : reasons.join("; ")
+  }
+
 end
 
 failures = repo_failures + branch_failures
 failures += release_failures
-puts
-puts "Summary: release_failures=#{release_failures} repo_failures=#{repo_failures} branch_failures=#{branch_failures} total_failures=#{failures}"
+unless json_output
+  puts "release_bump_plan workspace=#{WORKSPACE_DIR}"
+  puts "require_tags=#{require_tags}"
+  puts
+  puts "Latest release policy audit (previous tag -> latest tag)"
+  puts "repo|previous|latest|required|actual|status|reason"
+  release_rows.each do |row|
+    puts [row[:repo], row[:previous_tag], row[:latest_tag], row[:required], row[:actual], row[:status], row[:reason]].join("|")
+  end
+  puts
+  puts "Repo bump audit"
+  puts "repo|tag|head|commits|required|actual|status|reason"
+  repo_rows.each do |row|
+    puts [row[:repo], row[:tag], row[:head], row[:commits], row[:required], row[:actual], row[:status], row[:reason]].join("|")
+  end
+  puts
+  puts "rubocop-lts branch dependency/bump audit"
+  puts "branch|wrapper|required|actual|status|details"
+  branch_rows.each do |row|
+    puts [row[:branch], row[:wrapper], row[:required], row[:actual], row[:status], row[:details]].join("|")
+  end
+  puts
+  puts "Summary: release_failures=#{release_failures} repo_failures=#{repo_failures} branch_failures=#{branch_failures} total_failures=#{failures}"
+else
+  puts JSON.pretty_generate(
+    {
+      workspace: WORKSPACE_DIR.to_s,
+      require_tags: require_tags,
+      latest_release_policy_audit: release_rows,
+      repo_bump_audit: repo_rows,
+      rubocop_lts_branch_audit: branch_rows,
+      summary: {
+        release_failures: release_failures,
+        repo_failures: repo_failures,
+        branch_failures: branch_failures,
+        total_failures: failures
+      }
+    }
+  )
+end
 exit(failures.zero? ? 0 : 1)
