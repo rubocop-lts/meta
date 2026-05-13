@@ -6,6 +6,7 @@ require "net/http"
 require "open3"
 require "optparse"
 require "pathname"
+require "fileutils"
 require "pty"
 require "shellwords"
 require "uri"
@@ -13,6 +14,8 @@ require "io/console"
 
 WORKSPACE_DIR = Pathname.new(ENV.fetch("WORKSPACE_DIR", File.expand_path("../..", __dir__)))
 BUMP_PLAN_SCRIPT = WORKSPACE_DIR.join("meta", "scripts", "release_bump_plan.rb")
+TMPDIR_PATH = Pathname.new(ENV.fetch("TMPDIR", WORKSPACE_DIR.join("tmp").to_s))
+DEFAULT_BUMP_PLAN_JSON = TMPDIR_PATH.join("release_bump_plan.json")
 
 RELEASE_ORDER = %w[
   rubocop-ruby1_8
@@ -70,6 +73,10 @@ OptionParser.new do |opts|
 
   opts.on("--require-tags", "Run bump-plan in strict tag mode") do
     options[:require_tags] = true
+  end
+
+  opts.on("--json FILE", "Use an existing bump-plan JSON file instead of regenerating #{DEFAULT_BUMP_PLAN_JSON}") do |file|
+    options[:json_path] = Pathname.new(File.expand_path(file))
   end
 
   opts.on("--skip-tests", "Skip bundle exec rake spec") do
@@ -180,22 +187,34 @@ def ensure_clean_git!(repo)
   raise "#{repo} has uncommitted changes\n#{status}" unless status.empty?
 end
 
-def ensure_bump_plan_json!(require_tags:)
+def load_bump_plan_json!(json_path)
+  raise "Missing bump-plan JSON file: #{json_path}" unless json_path.exist?
+
+  JSON.parse(json_path.read)
+rescue JSON::ParserError => e
+  raise "bump plan did not return valid JSON: #{e.message}"
+end
+
+def ensure_bump_plan_json!(require_tags:, json_path: nil)
+  return [load_bump_plan_json!(json_path), json_path] if json_path
+
   raise "Missing bump plan script: #{BUMP_PLAN_SCRIPT}" unless BUMP_PLAN_SCRIPT.exist?
+
+  FileUtils.mkdir_p(TMPDIR_PATH)
+  FileUtils.rm_f(DEFAULT_BUMP_PLAN_JSON)
 
   cmd = [BUMP_PLAN_SCRIPT.to_s, "--json"]
   cmd << "--require-tags" if require_tags
 
   output, status = Open3.capture2e(*cmd, chdir: WORKSPACE_DIR)
-  parsed = JSON.parse(output)
+  DEFAULT_BUMP_PLAN_JSON.write(output)
+  parsed = load_bump_plan_json!(DEFAULT_BUMP_PLAN_JSON)
 
   if !status.success? && require_tags
     raise "bump plan reported blocking failures in strict mode"
   end
 
-  parsed
-rescue JSON::ParserError => e
-  raise "bump plan did not return valid JSON: #{e.message}"
+  [parsed, DEFAULT_BUMP_PLAN_JSON]
 end
 
 def apply_selection(repos, options)
@@ -216,7 +235,10 @@ def apply_selection(repos, options)
   selected
 end
 
-plan = ensure_bump_plan_json!(require_tags: options[:require_tags])
+plan, bump_plan_json_path = ensure_bump_plan_json!(
+  require_tags: options[:require_tags],
+  json_path: options[:json_path]
+)
 repo_rows = plan.fetch("repo_bump_audit")
 
 pending = repo_rows
@@ -232,6 +254,7 @@ if release_queue.empty?
 end
 
 puts "release_publish workspace=#{WORKSPACE_DIR}"
+puts "bump_plan_json=#{bump_plan_json_path}"
 puts "mode=#{options[:execute] ? (options[:push] ? "execute+push" : "execute+build") : "dry-run"}"
 puts "queue=#{release_queue.join(", ")}"
 
