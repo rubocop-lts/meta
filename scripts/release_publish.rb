@@ -60,6 +60,7 @@ options = {
   push_git: false,
   tag: false,
   require_tags: false,
+  include_main: false,
   skip_tests: false,
   execute: false
 }
@@ -89,6 +90,10 @@ OptionParser.new do |opts|
 
   opts.on("--require-tags", "Run bump-plan in strict tag mode") do
     options[:require_tags] = true
+  end
+
+  opts.on("--include-main", "Include rubocop-lts@main in release queue (off by default)") do
+    options[:include_main] = true
   end
 
   opts.on("--json FILE", "Use an existing bump-plan JSON file instead of regenerating #{DEFAULT_BUMP_PLAN_JSON}") do |file|
@@ -274,7 +279,7 @@ def target_key(target)
   target.fetch(:name)
 end
 
-def build_release_targets(plan)
+def build_release_targets(plan, include_main: false)
   repo_targets = plan.fetch("repo_bump_audit")
                 .select { |row| row.fetch("repo") != "rubocop-lts" }
                 .select { |row| row.fetch("commits").to_i > 0 }
@@ -291,6 +296,7 @@ def build_release_targets(plan)
                 end
 
   branch_targets = plan.fetch("rubocop_lts_branch_audit")
+                  .reject { |row| row.fetch("branch") == "main" && !include_main }
                   .select do |row|
                     row.fetch("head_tag_exists") == false || row.fetch("commits_past_head_tag").to_i > 0
                   end
@@ -322,7 +328,7 @@ plan, bump_plan_json_path = ensure_bump_plan_json!(
   require_tags: options[:require_tags],
   json_path: options[:json_path]
 )
-release_queue = build_release_targets(plan)
+release_queue = build_release_targets(plan, include_main: options[:include_main])
 release_queue = apply_selection(release_queue, options)
 
 if release_queue.empty?
