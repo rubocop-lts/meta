@@ -363,11 +363,11 @@ begin
     gem_name = target.fetch(:gem_name)
     target_name = target_key(target)
 
+    puts "\n=== #{target_name} #{version} ==="
+
     if target[:type] == :branch
       checkout_ref!(repo, target.fetch(:ref), execute: options[:execute])
     end
-
-    puts "\n=== #{target_name} #{version} ==="
 
     if options[:push] && rubygems_version_released?(gem_name, version)
       puts "Skipping #{gem_name} #{version}; already released on RubyGems."
@@ -415,7 +415,10 @@ begin
     options[:execute] ? run!(["git", "push", "origin", tag_name], chdir: repo_dir) : puts("DRY-RUN: git push origin #{tag_name}")
   end
 ensure
-  checkout_ref!("rubocop-lts", original_rubocop_lts_branch, execute: options[:execute]) if original_rubocop_lts_branch
+  if original_rubocop_lts_branch
+    puts "\n=== restore rubocop-lts branch ==="
+    checkout_ref!("rubocop-lts", original_rubocop_lts_branch, execute: options[:execute])
+  end
 end
 
 puts "\nrelease_publish complete"
