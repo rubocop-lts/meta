@@ -17,7 +17,7 @@ BUMP_PLAN_SCRIPT = WORKSPACE_DIR.join("meta", "scripts", "release_bump_plan.rb")
 TMPDIR_PATH = Pathname.new(ENV.fetch("TMPDIR", WORKSPACE_DIR.join("tmp").to_s))
 DEFAULT_BUMP_PLAN_JSON = TMPDIR_PATH.join("release_bump_plan.json")
 
-RELEASE_ORDER = %w[
+REPO_RELEASE_ORDER = %w[
   rubocop-ruby1_8
   rubocop-ruby1_9
   rubocop-ruby2_0
@@ -33,7 +33,23 @@ RELEASE_ORDER = %w[
   rubocop-ruby3_2
   standard-rubocop-lts
   rubocop-lts-rspec
-  rubocop-lts
+].freeze
+
+RUBOCOP_LTS_BRANCH_RELEASE_ORDER = %w[
+  r1_8-even-v0
+  r1_9-even-v2
+  r2_0-even-v4
+  r2_1-even-v6
+  r2_2-even-v8
+  r2_3-even-v10
+  r2_4-even-v12
+  r2_5-even-v14
+  r2_6-even-v16
+  r2_7-even-v18
+  r3_0-even-v20
+  r3_1-even-v22
+  r3_2-even-v24
+  main
 ].freeze
 
 PROMPT_SIGNING = /pass\s*(?:phrase|word)|signing key|private key/i
@@ -83,11 +99,11 @@ OptionParser.new do |opts|
     options[:skip_tests] = true
   end
 
-  opts.on("--only REPO", "Release only one repo from release order") do |repo|
+  opts.on("--only TARGET", "Release only one repo or all rubocop-lts branches via rubocop-lts / rubocop-lts@branch") do |repo|
     options[:only] = repo
   end
 
-  opts.on("--start-at REPO", "Start from repo in release order") do |repo|
+  opts.on("--start-at TARGET", "Start from repo or rubocop-lts@branch in release order") do |repo|
     options[:start_at] = repo
   end
 
@@ -187,6 +203,21 @@ def ensure_clean_git!(repo)
   raise "#{repo} has uncommitted changes\n#{status}" unless status.empty?
 end
 
+def current_branch(repo)
+  repo_dir = WORKSPACE_DIR.join(repo)
+  capture!(["git", "branch", "--show-current"], chdir: repo_dir).strip
+end
+
+def checkout_ref!(repo, ref, execute:)
+  cmd = ["git", "checkout", ref]
+  repo_dir = WORKSPACE_DIR.join(repo)
+  if execute
+    run!(cmd, chdir: repo_dir)
+  else
+    puts "DRY-RUN: #{sh(cmd)}"
+  end
+end
+
 def load_bump_plan_json!(json_path)
   raise "Missing bump-plan JSON file: #{json_path}" unless json_path.exist?
 
@@ -221,12 +252,16 @@ def apply_selection(repos, options)
   selected = repos.dup
 
   if options[:only]
-    selected.select! { |repo| repo == options[:only] }
+    selected.select! do |target|
+      target_key(target) == options[:only] || (options[:only] == "rubocop-lts" && target.fetch(:repo) == "rubocop-lts")
+    end
     raise "Unknown repo for --only: #{options[:only]}" if selected.empty?
   end
 
   if options[:start_at]
-    idx = selected.index(options[:start_at])
+    idx = selected.index do |target|
+      target_key(target) == options[:start_at] || (options[:start_at] == "rubocop-lts" && target.fetch(:repo) == "rubocop-lts")
+    end
     raise "Unknown repo for --start-at: #{options[:start_at]}" unless idx
 
     selected = selected.drop(idx)
@@ -235,17 +270,59 @@ def apply_selection(repos, options)
   selected
 end
 
+def target_key(target)
+  target.fetch(:name)
+end
+
+def build_release_targets(plan)
+  repo_targets = plan.fetch("repo_bump_audit")
+                .select { |row| row.fetch("repo") != "rubocop-lts" }
+                .select { |row| row.fetch("commits").to_i > 0 }
+                .reject { |row| row.fetch("status") == "FAIL" }
+                .map do |row|
+                  repo = row.fetch("repo")
+                  {
+                    type: :repo,
+                    repo: repo,
+                    name: repo,
+                    version: repo_version(repo),
+                    gem_name: gemspec_name(repo)
+                  }
+                end
+
+  branch_targets = plan.fetch("rubocop_lts_branch_audit")
+                  .select do |row|
+                    row.fetch("head_tag_exists") == false || row.fetch("commits_past_head_tag").to_i > 0
+                  end
+                  .reject { |row| row.fetch("status") == "FAIL" }
+                  .map do |row|
+                    branch = row.fetch("branch")
+                    {
+                      type: :branch,
+                      repo: "rubocop-lts",
+                      ref: branch,
+                      name: "rubocop-lts@#{branch}",
+                      version: row.fetch("head_version"),
+                      gem_name: gemspec_name("rubocop-lts")
+                    }
+                  end
+
+  ordered_repo_targets = REPO_RELEASE_ORDER.filter_map do |repo|
+    repo_targets.find { |target| target.fetch(:repo) == repo }
+  end
+
+  ordered_branch_targets = RUBOCOP_LTS_BRANCH_RELEASE_ORDER.filter_map do |branch|
+    branch_targets.find { |target| target.fetch(:ref) == branch }
+  end
+
+  ordered_repo_targets + ordered_branch_targets
+end
+
 plan, bump_plan_json_path = ensure_bump_plan_json!(
   require_tags: options[:require_tags],
   json_path: options[:json_path]
 )
-repo_rows = plan.fetch("repo_bump_audit")
-
-pending = repo_rows
-          .select { |row| row.fetch("commits").to_i > 0 }
-          .map { |row| row.fetch("repo") }
-
-release_queue = RELEASE_ORDER.select { |repo| pending.include?(repo) }
+release_queue = build_release_targets(plan)
 release_queue = apply_selection(release_queue, options)
 
 if release_queue.empty?
@@ -256,9 +333,9 @@ end
 puts "release_publish workspace=#{WORKSPACE_DIR}"
 puts "bump_plan_json=#{bump_plan_json_path}"
 puts "mode=#{options[:execute] ? (options[:push] ? "execute+push" : "execute+build") : "dry-run"}"
-puts "queue=#{release_queue.join(", ")}"
+puts "queue=#{release_queue.map { |target| target_key(target) }.join(", ")}"
 
-release_queue.each { |repo| ensure_clean_git!(repo) }
+release_queue.map { |target| target.fetch(:repo) }.uniq.each { |repo| ensure_clean_git!(repo) }
 
 if options[:push_git] && (!options[:push] || !options[:execute])
   raise "--push-git requires --execute --push"
@@ -276,57 +353,69 @@ if options[:execute] && options[:push]
   raise "Gem signing key passphrase cannot be empty" if signing_key_passphrase.empty?
 end
 
-release_queue.each do |repo|
-  repo_dir = WORKSPACE_DIR.join(repo)
-  version = repo_version(repo)
-  gem_name = gemspec_name(repo)
+original_rubocop_lts_branch = current_branch("rubocop-lts") if release_queue.any? { |target| target.fetch(:repo) == "rubocop-lts" }
 
-  puts "\n=== #{repo} #{version} ==="
+begin
+  release_queue.each do |target|
+    repo = target.fetch(:repo)
+    repo_dir = WORKSPACE_DIR.join(repo)
+    version = target.fetch(:version)
+    gem_name = target.fetch(:gem_name)
+    target_name = target_key(target)
 
-  if options[:push] && rubygems_version_released?(gem_name, version)
-    puts "Skipping #{gem_name} #{version}; already released on RubyGems."
-    next
-  end
+    if target[:type] == :branch
+      checkout_ref!(repo, target.fetch(:ref), execute: options[:execute])
+    end
 
-  if options[:skip_tests]
-    puts "Skipping tests for #{repo}"
-  else
-    spec_dir = repo_dir.join("spec")
-    if spec_dir.exist?
-      cmd = ["bundle", "exec", "rake", "spec"]
+    puts "\n=== #{target_name} #{version} ==="
+
+    if options[:push] && rubygems_version_released?(gem_name, version)
+      puts "Skipping #{gem_name} #{version}; already released on RubyGems."
+      next
+    end
+
+    if options[:skip_tests]
+      puts "Skipping tests for #{target_name}"
+    else
+      spec_dir = repo_dir.join("spec")
+      if spec_dir.exist?
+        cmd = ["bundle", "exec", "rake", "spec"]
+        options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
+      else
+        puts "No spec directory in #{target_name}; skipping tests"
+      end
+    end
+
+    if options[:push]
+      cmd = ["bundle", "exec", "rake", "release"]
+      if options[:execute]
+        run_with_auth!(cmd, chdir: repo_dir, signing_key_passphrase: signing_key_passphrase)
+        run!(["gem", "info", gem_name, "--remote", "-v", version], chdir: repo_dir)
+      else
+        puts "DRY-RUN: #{sh(cmd)}"
+      end
+    else
+      cmd = ["bundle", "exec", "rake", "build"]
       options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
-    else
-      puts "No spec directory in #{repo}; skipping tests"
     end
-  end
 
-  if options[:push]
-    cmd = ["bundle", "exec", "rake", "release"]
-    if options[:execute]
-      run_with_auth!(cmd, chdir: repo_dir, signing_key_passphrase: signing_key_passphrase)
-      run!(["gem", "info", gem_name, "--remote", "-v", version], chdir: repo_dir)
-    else
-      puts "DRY-RUN: #{sh(cmd)}"
+    next unless options[:tag]
+
+    tag_name = "v#{version}"
+    tag_exists = system("git", "rev-parse", "-q", "--verify", "refs/tags/#{tag_name}", chdir: repo_dir,
+      out: File::NULL, err: File::NULL)
+    unless tag_exists
+      cmd = ["git", "tag", "-a", tag_name, "-m", "Release #{target_name} #{version}"]
+      options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
     end
-  else
-    cmd = ["bundle", "exec", "rake", "build"]
-    options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
+
+    next unless options[:push_git]
+
+    options[:execute] ? run!(["git", "push", "origin", "HEAD"], chdir: repo_dir) : puts("DRY-RUN: git push origin HEAD")
+    options[:execute] ? run!(["git", "push", "origin", tag_name], chdir: repo_dir) : puts("DRY-RUN: git push origin #{tag_name}")
   end
-
-  next unless options[:tag]
-
-  tag_name = "v#{version}"
-  tag_exists = system("git", "rev-parse", "-q", "--verify", "refs/tags/#{tag_name}", chdir: repo_dir,
-    out: File::NULL, err: File::NULL)
-  unless tag_exists
-    cmd = ["git", "tag", "-a", tag_name, "-m", "Release #{repo} #{version}"]
-    options[:execute] ? run!(cmd, chdir: repo_dir) : puts("DRY-RUN: #{sh(cmd)}")
-  end
-
-  next unless options[:push_git]
-
-  options[:execute] ? run!(["git", "push", "origin", "HEAD"], chdir: repo_dir) : puts("DRY-RUN: git push origin HEAD")
-  options[:execute] ? run!(["git", "push", "origin", tag_name], chdir: repo_dir) : puts("DRY-RUN: git push origin #{tag_name}")
+ensure
+  checkout_ref!("rubocop-lts", original_rubocop_lts_branch, execute: options[:execute]) if original_rubocop_lts_branch
 end
 
 puts "\nrelease_publish complete"
