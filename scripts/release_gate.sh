@@ -291,17 +291,17 @@ audit_rubocop_lts_branches() {
     check_ref_sync "rubocop-lts" "$branch" "rubocop-lts:$branch"
 
     dep_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep 'spec.add_dependency("rubocop-ruby' || true)
-    std_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep -F 'spec.add_dependency("standard-rubocop-lts", ">= 2.0.0", "< 3")' || true)
-    rspec_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep 'spec.add_development_dependency("rubocop-lts-rspec", "~> 1.0")' || true)
+    std_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep -F 'spec.add_dependency("standard-rubocop-lts", ">= 2.0.2", "< 3")' || true)
+    rspec_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep 'spec.add_development_dependency("rubocop-lts-rspec", "~> 1.0", ">= 1.0.1")' || true)
 
     if [[ "$dep_line" != *"$expected"* ]]; then
       blocker "rubocop-lts:$branch wrapper mismatch (expected $expected)"
     fi
     if [ -z "$std_line" ]; then
-      blocker "rubocop-lts:$branch does not pin standard-rubocop-lts >= 2.0.0, < 3"
+      blocker "rubocop-lts:$branch does not pin standard-rubocop-lts >= 2.0.2, < 3"
     fi
     if [ -z "$rspec_line" ]; then
-      blocker "rubocop-lts:$branch missing rubocop-lts-rspec ~> 1.0 dev dependency"
+      blocker "rubocop-lts:$branch missing rubocop-lts-rspec ~> 1.0, >= 1.0.1 dev dependency"
     fi
 
     version=$(git -C "$repo_dir" show "$branch:lib/rubocop/lts/version.rb" | grep 'VERSION =' | sed -E 's/.*"([^"]+)".*/\1/')
