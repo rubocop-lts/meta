@@ -440,6 +440,12 @@ begin
 
     puts "\n=== #{target_name} #{version} ==="
 
+    if options[:push] && rubygems_version_released?(gem_name, version)
+      puts "Skipping #{gem_name} #{version}; already released on RubyGems."
+      failed_target = nil
+      next
+    end
+
     if target[:type] == :branch
       checkout_ref!(repo, target.fetch(:ref), execute: options[:execute])
     end
@@ -460,11 +466,6 @@ begin
       execute: options[:execute],
       push_git: options[:push_git]
     )
-
-    if options[:push] && rubygems_version_released?(gem_name, version)
-      puts "Skipping #{gem_name} #{version}; already released on RubyGems."
-      next
-    end
 
     if options[:skip_tests]
       puts "Skipping tests for #{target_name}"

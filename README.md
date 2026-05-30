@@ -277,6 +277,10 @@ an interactive OTP prompt.
 `--tag` creates missing `vVERSION` release tags as part of the publish driver.
 The gate script does not require those tags unless `--require-tags` is used.
 
+With `--push`, the publish driver checks RubyGems before target preparation.
+Already-published gem versions are skipped without running prepare, install,
+test, build, tag, or push commands for that target.
+
 ## Command Groups
 
 Typical preparation:
