@@ -243,7 +243,7 @@ end
 
 def prepare_release_target!(repo_dir, execute:)
   [
-    ["mise", "use", "ruby@3.0.5"],
+    ["mise", "use", "ruby@4.0.5"],
     ["mise", "trust", "mise.toml"],
     ["bundle", "update"],
     ["bundle", "update", "--bundler"]

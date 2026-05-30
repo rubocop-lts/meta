@@ -199,7 +199,7 @@ companion versions for dependent gems.
 For each selected target, the prepare step runs:
 
 ```shell
-mise use ruby@3.0.5
+mise use ruby@4.0.5
 mise trust mise.toml
 bundle update
 bundle update --bundler
