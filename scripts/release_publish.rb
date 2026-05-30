@@ -18,6 +18,8 @@ TMPDIR_PATH = Pathname.new(ENV.fetch("TMPDIR", WORKSPACE_DIR.join("tmp").to_s))
 DEFAULT_BUMP_PLAN_JSON = TMPDIR_PATH.join("release_bump_plan.json")
 
 REPO_RELEASE_ORDER = %w[
+  standard-rubocop-lts
+  rubocop-lts-rspec
   rubocop-ruby1_8
   rubocop-ruby1_9
   rubocop-ruby2_0
@@ -31,8 +33,6 @@ REPO_RELEASE_ORDER = %w[
   rubocop-ruby3_0
   rubocop-ruby3_1
   rubocop-ruby3_2
-  standard-rubocop-lts
-  rubocop-lts-rspec
 ].freeze
 
 RUBOCOP_LTS_BRANCH_RELEASE_ORDER = %w[
@@ -61,6 +61,7 @@ options = {
   tag: false,
   require_tags: false,
   include_main: false,
+  prepare: true,
   bundle_install: true,
   skip_tests: false,
   execute: false
@@ -95,6 +96,10 @@ OptionParser.new do |opts|
 
   opts.on("--include-main", "Include rubocop-lts@main in release queue (off by default)") do
     options[:include_main] = true
+  end
+
+  opts.on("--[no-]prepare", "Run mise/bundler preparation before build/release (default: enabled)") do |value|
+    options[:prepare] = value
   end
 
   opts.on("--json FILE", "Use an existing bump-plan JSON file instead of regenerating #{DEFAULT_BUMP_PLAN_JSON}") do |file|
@@ -236,6 +241,17 @@ def checkout_ref!(repo, ref, execute:)
   end
 end
 
+def prepare_release_target!(repo_dir, execute:)
+  [
+    ["mise", "use", "ruby@3.0.5"],
+    ["mise", "trust", "mise.toml"],
+    ["bundle", "update"],
+    ["bundle", "update", "--bundler"]
+  ].each do |cmd|
+    run_or_echo!(cmd, chdir: repo_dir, execute: execute)
+  end
+end
+
 def load_bump_plan_json!(json_path)
   raise "Missing bump-plan JSON file: #{json_path}" unless json_path.exist?
 
@@ -352,41 +368,51 @@ end
 puts "release_publish workspace=#{WORKSPACE_DIR}"
 puts "bump_plan_json=#{bump_plan_json_path}"
 puts "mode=#{options[:execute] ? (options[:push] ? "execute+push" : "execute+build") : "dry-run"}"
+puts "prepare=#{options[:prepare]}"
 puts "bundle_install=#{options[:bundle_install]}"
 puts "queue=#{release_queue.map { |target| target_key(target) }.join(", ")}"
 
-release_queue.map { |target| target.fetch(:repo) }.uniq.each { |repo| ensure_clean_git!(repo) }
-
-if options[:push_git] && (!options[:push] || !options[:execute])
-  raise "--push-git requires --execute --push"
-end
-
-if options[:tag] && !options[:execute]
-  raise "--tag requires --execute"
-end
-
 signing_key_passphrase = nil
-if options[:execute] && options[:push]
-  print "Gem signing key passphrase: "
-  signing_key_passphrase = STDIN.noecho(&:gets)&.chomp.to_s
-  puts
-  raise "Gem signing key passphrase cannot be empty" if signing_key_passphrase.empty?
-end
-
-original_rubocop_lts_branch = current_branch("rubocop-lts") if release_queue.any? { |target| target.fetch(:repo) == "rubocop-lts" }
+original_rubocop_lts_branch = nil
+failed_target = nil
 
 begin
+  failed_target = "preflight"
+  release_queue.map { |target| target.fetch(:repo) }.uniq.each { |repo| ensure_clean_git!(repo) }
+
+  if options[:push_git] && (!options[:push] || !options[:execute])
+    raise "--push-git requires --execute --push"
+  end
+
+  if options[:tag] && !options[:execute]
+    raise "--tag requires --execute"
+  end
+
+  if options[:execute] && options[:push]
+    print "Gem signing key passphrase: "
+    signing_key_passphrase = STDIN.noecho(&:gets)&.chomp.to_s
+    puts
+    raise "Gem signing key passphrase cannot be empty" if signing_key_passphrase.empty?
+  end
+
+  original_rubocop_lts_branch = current_branch("rubocop-lts") if release_queue.any? { |target| target.fetch(:repo) == "rubocop-lts" }
+
   release_queue.each do |target|
     repo = target.fetch(:repo)
     repo_dir = WORKSPACE_DIR.join(repo)
     version = target.fetch(:version)
     gem_name = target.fetch(:gem_name)
     target_name = target_key(target)
+    failed_target = target_name
 
     puts "\n=== #{target_name} #{version} ==="
 
     if target[:type] == :branch
       checkout_ref!(repo, target.fetch(:ref), execute: options[:execute])
+    end
+
+    if options[:prepare]
+      prepare_release_target!(repo_dir, execute: options[:execute])
     end
 
     if options[:bundle_install]
@@ -438,7 +464,11 @@ begin
 
     options[:execute] ? run!(["git", "push", "origin", "HEAD"], chdir: repo_dir) : puts("DRY-RUN: git push origin HEAD")
     options[:execute] ? run!(["git", "push", "origin", tag_name], chdir: repo_dir) : puts("DRY-RUN: git push origin #{tag_name}")
+    failed_target = nil
   end
+rescue StandardError => e
+  warn "\nrelease_publish failed at #{failed_target || "startup"}: #{e.message}"
+  exit 1
 ensure
   if original_rubocop_lts_branch
     puts "\n=== restore rubocop-lts branch ==="

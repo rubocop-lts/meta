@@ -80,7 +80,7 @@ Usage: release_gate.sh [options]
 Options:
   --run-validation   Run specs and rubocop_gradual checks (slow)
   --audit-bumps      Run semantic bump-policy audit (release_bump_plan.rb)
-  --require-tags     Enforce version/tag alignment checks as blockers
+  --require-tags     Enforce version/tag alignment checks as post-release blockers
   --quiet            Reduce non-essential output
   -h, --help         Show this help
 
@@ -159,10 +159,79 @@ repo_version() {
   grep -E 'VERSION *= *"' "$version_file" | head -n 1 | sed -E 's/.*VERSION *= *"([^"]+)".*/\1/'
 }
 
+audit_gemspec() {
+  local repo="$1"
+  local repo_dir="$WORKSPACE_DIR/$repo"
+  local gemspec
+
+  gemspec=$(find "$repo_dir" -maxdepth 1 -name '*.gemspec' -type f | head -n 1 || true)
+  if [ -z "$gemspec" ]; then
+    warn "$repo has no gemspec"
+    return
+  fi
+
+  if ! ruby -e 'Dir.chdir(ARGV.fetch(0)) { spec = Gem::Specification.load(ARGV.fetch(1)); spec.validate }' "$repo_dir" "$(basename "$gemspec")" >/dev/null 2>&1; then
+    blocker "$repo gemspec is invalid ($gemspec)"
+  fi
+}
+
+audit_gemfile_sources() {
+  local repo="$1"
+  local repo_dir="$WORKSPACE_DIR/$repo"
+  local gemfile="$repo_dir/Gemfile"
+
+  if [ ! -f "$gemfile" ]; then
+    return
+  fi
+
+  if grep -Eq '(^|[[:space:],])(:github[[:space:]]*=>|github:|git:)' "$gemfile"; then
+    blocker "$repo Gemfile contains an active git dependency"
+  fi
+}
+
+check_ref_sync() {
+  local repo="$1"
+  local ref="$2"
+  local label="$3"
+  local repo_dir="$WORKSPACE_DIR/$repo"
+  local upstream ahead behind
+
+  if upstream=$(git -C "$repo_dir" rev-parse --abbrev-ref "$ref@{upstream}" 2>/dev/null); then
+    ahead=$(git -C "$repo_dir" rev-list --left-right --count "$upstream...$ref" | awk '{print $2}')
+    behind=$(git -C "$repo_dir" rev-list --left-right --count "$upstream...$ref" | awk '{print $1}')
+    if [ "$ahead" -ne 0 ] || [ "$behind" -ne 0 ]; then
+      blocker "$label is not fully synced with upstream $upstream (ahead=$ahead behind=$behind)"
+    fi
+  else
+    blocker "$label has no upstream tracking branch configured"
+  fi
+}
+
+check_version_tag() {
+  local repo="$1"
+  local ref="$2"
+  local label="$3"
+  local version="$4"
+  local repo_dir="$WORKSPACE_DIR/$repo"
+  local tag commits
+
+  tag="v$version"
+  if git -C "$repo_dir" rev-parse "$tag" >/dev/null 2>&1; then
+    commits=$(git -C "$repo_dir" rev-list --count "$tag".."$ref")
+    if [ "$commits" -ne 0 ]; then
+      blocker "$label is $commits commit(s) past version tag $tag"
+    else
+      log "OK: $label version/tag aligned at $tag"
+    fi
+  else
+    blocker "$label missing version tag $tag"
+  fi
+}
+
 audit_repo_state() {
   local repo="$1"
   local repo_dir="$WORKSPACE_DIR/$repo"
-  local branch dirty ahead behind version tag commits
+  local branch dirty version
 
   log ""
   log "--- $repo ---"
@@ -172,7 +241,7 @@ audit_repo_state() {
   fi
 
   branch=$(git -C "$repo_dir" branch --show-current)
-  if [ "$branch" != "main" ]; then
+  if [ "$repo" != "rubocop-lts" ] && [ "$branch" != "main" ]; then
     blocker "$repo is on branch '$branch' (expected main)"
   fi
 
@@ -181,14 +250,11 @@ audit_repo_state() {
     blocker "$repo has uncommitted changes"
   fi
 
-  if git -C "$repo_dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-    ahead=$(git -C "$repo_dir" rev-list --left-right --count '@{u}'...HEAD | awk '{print $2}')
-    behind=$(git -C "$repo_dir" rev-list --left-right --count '@{u}'...HEAD | awk '{print $1}')
-    if [ "$ahead" -ne 0 ] || [ "$behind" -ne 0 ]; then
-      blocker "$repo is not fully synced with upstream (ahead=$ahead behind=$behind)"
-    fi
-  else
-    blocker "$repo has no upstream tracking branch configured"
+  audit_gemspec "$repo"
+  audit_gemfile_sources "$repo"
+
+  if [ "$repo" != "rubocop-lts" ]; then
+    check_ref_sync "$repo" "HEAD" "$repo:$branch"
   fi
 
   version=$(repo_version "$repo")
@@ -197,30 +263,14 @@ audit_repo_state() {
     return
   fi
 
-  tag="v$version"
-  if git -C "$repo_dir" rev-parse "$tag" >/dev/null 2>&1; then
-    commits=$(git -C "$repo_dir" rev-list --count "$tag"..HEAD)
-    if [ "$commits" -ne 0 ]; then
-      if [ "$REQUIRE_TAGS" = true ]; then
-        blocker "$repo HEAD is $commits commit(s) past version tag $tag"
-      else
-        warn "$repo HEAD is $commits commit(s) past version tag $tag (tag checks are advisory without --require-tags)"
-      fi
-    else
-      log "OK: $repo version/tag aligned at $tag"
-    fi
-  else
-    if [ "$REQUIRE_TAGS" = true ]; then
-      blocker "$repo missing version tag $tag"
-    else
-      warn "$repo missing version tag $tag (tag checks are advisory without --require-tags)"
-    fi
+  if [ "$REQUIRE_TAGS" = true ] && [ "$repo" != "rubocop-lts" ]; then
+    check_version_tag "$repo" "HEAD" "$repo:$branch" "$version"
   fi
 }
 
 audit_rubocop_lts_branches() {
   local repo_dir="$WORKSPACE_DIR/rubocop-lts"
-  local branch expected dep_line std_line rspec_line version tag commits
+  local branch expected dep_line std_line rspec_line version
 
   if ! require_repo "rubocop-lts"; then
     return
@@ -238,6 +288,8 @@ audit_rubocop_lts_branches() {
       continue
     fi
 
+    check_ref_sync "rubocop-lts" "$branch" "rubocop-lts:$branch"
+
     dep_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep 'spec.add_dependency("rubocop-ruby' || true)
     std_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep -F 'spec.add_dependency("standard-rubocop-lts", ">= 2.0.0", "< 3")' || true)
     rspec_line=$(git -C "$repo_dir" show "$branch:rubocop-lts.gemspec" | grep 'spec.add_development_dependency("rubocop-lts-rspec", "~> 1.0")' || true)
@@ -253,22 +305,8 @@ audit_rubocop_lts_branches() {
     fi
 
     version=$(git -C "$repo_dir" show "$branch:lib/rubocop/lts/version.rb" | grep 'VERSION =' | sed -E 's/.*"([^"]+)".*/\1/')
-    tag="v$version"
-    if git -C "$repo_dir" rev-parse "$tag" >/dev/null 2>&1; then
-      commits=$(git -C "$repo_dir" rev-list --count "$tag".."$branch")
-      if [ "$commits" -ne 0 ]; then
-        if [ "$REQUIRE_TAGS" = true ]; then
-          blocker "rubocop-lts:$branch is $commits commit(s) past version tag $tag"
-        else
-          warn "rubocop-lts:$branch is $commits commit(s) past version tag $tag (tag checks are advisory without --require-tags)"
-        fi
-      fi
-    else
-      if [ "$REQUIRE_TAGS" = true ]; then
-        blocker "rubocop-lts:$branch missing version tag $tag"
-      else
-        warn "rubocop-lts:$branch missing version tag $tag (tag checks are advisory without --require-tags)"
-      fi
+    if [ "$REQUIRE_TAGS" = true ]; then
+      check_version_tag "rubocop-lts" "$branch" "rubocop-lts:$branch" "$version"
     fi
   done
 }
@@ -343,7 +381,7 @@ print_summary() {
     printf 'bump log:  %s\n' "$BUMP_AUDIT_LOG"
   fi
 
-  printf 'tags:      %s\n' "$( [ "$REQUIRE_TAGS" = true ] && echo required || echo advisory )"
+  printf 'tags:      %s\n' "$( [ "$REQUIRE_TAGS" = true ] && echo required || echo unchecked )"
 
   if [ "$BLOCKERS" -eq 0 ]; then
     printf 'RESULT: PASS (release gate is green)\n'
