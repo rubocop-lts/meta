@@ -189,9 +189,24 @@ audit_gemfile_sources() {
   fi
 }
 
+audit_tracked_coverage() {
+  local repo="$1"
+  local repo_dir="$WORKSPACE_DIR/$repo"
+  local tracked
+
+  tracked=$(git -C "$repo_dir" ls-files coverage results/coverage)
+  if [ -n "$tracked" ]; then
+    blocker "$repo has tracked coverage output"
+  fi
+
+  if [ -f "$repo_dir/.simplecov" ] && grep -q 'results/coverage' "$repo_dir/.simplecov"; then
+    blocker "$repo .simplecov writes coverage to results/coverage"
+  fi
+}
+
 audit_rubocop_lts_branch_sources() {
   local repo_dir="$WORKSPACE_DIR/rubocop-lts"
-  local branch file content
+  local branch file content tracked_coverage
 
   for branch in "${RUBOCOP_LTS_BRANCHES[@]}"; do
     if ! git -C "$repo_dir" rev-parse --verify "$branch" >/dev/null 2>&1; then
@@ -204,6 +219,16 @@ audit_rubocop_lts_branch_sources() {
         blocker "rubocop-lts:$branch $file contains an active git dependency"
       fi
     done < <(git -C "$repo_dir" ls-tree -r --name-only "$branch" -- Gemfile gemfiles '*.gemspec' | grep -E '(^Gemfile$|\.gemfile$|\.gemspec$)' || true)
+
+    tracked_coverage=$(git -C "$repo_dir" ls-tree -r --name-only "$branch" -- coverage results/coverage)
+    if [ -n "$tracked_coverage" ]; then
+      blocker "rubocop-lts:$branch has tracked coverage output"
+    fi
+
+    content=$(git -C "$repo_dir" show "$branch:.simplecov" 2>/dev/null || true)
+    if grep -q 'results/coverage' <<<"$content"; then
+      blocker "rubocop-lts:$branch .simplecov writes coverage to results/coverage"
+    fi
   done
 }
 
@@ -270,6 +295,7 @@ audit_repo_state() {
 
   audit_gemspec "$repo"
   audit_gemfile_sources "$repo"
+  audit_tracked_coverage "$repo"
 
   if [ "$repo" != "rubocop-lts" ]; then
     check_ref_sync "$repo" "HEAD" "$repo:$branch"

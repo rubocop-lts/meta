@@ -264,10 +264,12 @@ def commit_prepare_changes!(repo_dir, target_name, version, execute:, push_git:)
 
   message = "Update release preparation for #{target_name} #{version}"
   if execute
+    run!(["git", "rm", "-r", "--cached", "--ignore-unmatch", "coverage", "results/coverage"], chdir: repo_dir)
     run!(["git", "add", "-A"], chdir: repo_dir)
     run!(["git", "commit", "-m", message], chdir: repo_dir)
     push_current_ref!(repo_dir, target_name, execute: true) if push_git
   else
+    puts "DRY-RUN: git rm -r --cached --ignore-unmatch coverage results/coverage"
     puts "DRY-RUN: git add -A"
     puts "DRY-RUN: git commit -m #{message.shellescape}"
     push_current_ref!(repo_dir, target_name, execute: false) if push_git
