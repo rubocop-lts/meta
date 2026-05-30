@@ -189,6 +189,24 @@ audit_gemfile_sources() {
   fi
 }
 
+audit_rubocop_lts_branch_sources() {
+  local repo_dir="$WORKSPACE_DIR/rubocop-lts"
+  local branch file content
+
+  for branch in "${RUBOCOP_LTS_BRANCHES[@]}"; do
+    if ! git -C "$repo_dir" rev-parse --verify "$branch" >/dev/null 2>&1; then
+      continue
+    fi
+
+    while IFS= read -r file; do
+      content=$(git -C "$repo_dir" show "$branch:$file" 2>/dev/null || true)
+      if grep -Eq '(^|[[:space:],])(:github[[:space:]]*=>|github:|git:)' <<<"$content"; then
+        blocker "rubocop-lts:$branch $file contains an active git dependency"
+      fi
+    done < <(git -C "$repo_dir" ls-tree -r --name-only "$branch" -- Gemfile gemfiles '*.gemspec' | grep -E '(^Gemfile$|\.gemfile$|\.gemspec$)' || true)
+  done
+}
+
 check_ref_sync() {
   local repo="$1"
   local ref="$2"
@@ -278,6 +296,8 @@ audit_rubocop_lts_branches() {
 
   log ""
   log "=== rubocop-lts branch matrix audit ==="
+
+  audit_rubocop_lts_branch_sources
 
   for pair in "${EXPECTED_WRAPPER[@]}"; do
     branch=${pair%%:*}
