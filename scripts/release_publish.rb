@@ -226,6 +226,10 @@ def ensure_clean_git!(repo)
   raise "#{repo} has uncommitted changes\n#{status}" unless status.empty?
 end
 
+def git_dirty?(repo_dir)
+  !capture!(["git", "status", "--porcelain"], chdir: repo_dir).empty?
+end
+
 def current_branch(repo)
   repo_dir = WORKSPACE_DIR.join(repo)
   capture!(["git", "branch", "--show-current"], chdir: repo_dir).strip
@@ -238,6 +242,35 @@ def checkout_ref!(repo, ref, execute:)
     run!(cmd, chdir: repo_dir)
   else
     puts "DRY-RUN: #{sh(cmd)}"
+  end
+end
+
+def push_current_ref!(repo_dir, target_name, execute:)
+  branch = capture!(["git", "branch", "--show-current"], chdir: repo_dir).strip
+  upstream = capture!(["git", "rev-parse", "--abbrev-ref", "#{branch}@{upstream}"], chdir: repo_dir).strip
+  remote = upstream.split("/", 2).fetch(0)
+  remote_branch = upstream.split("/", 2).fetch(1)
+  cmd = ["git", "push", remote, "#{branch}:#{remote_branch}"]
+
+  if execute
+    run!(cmd, chdir: repo_dir)
+  else
+    puts "DRY-RUN: #{sh(cmd)} # #{target_name}"
+  end
+end
+
+def commit_prepare_changes!(repo_dir, target_name, version, execute:, push_git:)
+  return unless git_dirty?(repo_dir)
+
+  message = "Update release preparation for #{target_name} #{version}"
+  if execute
+    run!(["git", "add", "-A"], chdir: repo_dir)
+    run!(["git", "commit", "-m", message], chdir: repo_dir)
+    push_current_ref!(repo_dir, target_name, execute: true) if push_git
+  else
+    puts "DRY-RUN: git add -A"
+    puts "DRY-RUN: git commit -m #{message.shellescape}"
+    push_current_ref!(repo_dir, target_name, execute: false) if push_git
   end
 end
 
@@ -419,6 +452,14 @@ begin
       # Ensure git/path sources in Gemfile/Gemfile.lock are resolved before rake tasks.
       run_or_echo!(["bundle", "install"], chdir: repo_dir, execute: options[:execute])
     end
+
+    commit_prepare_changes!(
+      repo_dir,
+      target_name,
+      version,
+      execute: options[:execute],
+      push_git: options[:push_git]
+    )
 
     if options[:push] && rubygems_version_released?(gem_name, version)
       puts "Skipping #{gem_name} #{version}; already released on RubyGems."

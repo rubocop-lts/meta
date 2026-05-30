@@ -207,6 +207,11 @@ bundle update --bundler
 
 Use `--no-prepare` to skip those commands.
 
+If prepare or install commands modify the target repository, the publish driver
+commits those changes before build or release tasks run. With `--push-git`, that
+checkpoint commit is pushed before `rake release` so the release task sees a
+clean repository.
+
 Without `--execute`, the script prints the release queue and command preview,
 without running build, release, checkout, tag, or push commands.
 
