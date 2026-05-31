@@ -50,6 +50,7 @@ BUMP_RANK = { "none" => 0, "patch" => 1, "minor" => 2, "major" => 3 }.freeze
 def parse_args(argv)
   require_tags = REQUIRE_TAGS_DEFAULT
   json_output = false
+  list_current = false
 
   argv.each do |arg|
     case arg
@@ -57,6 +58,8 @@ def parse_args(argv)
       require_tags = true
     when "--json"
       json_output = true
+    when "--list-current"
+      list_current = true
     when "-h", "--help"
       puts <<~USAGE
         Usage: release_bump_plan.rb [options]
@@ -64,6 +67,7 @@ def parse_args(argv)
         Options:
           --require-tags   Enforce tag-dependent checks as failures
           --json           Emit machine-readable JSON output
+          --list-current   Emit current released-version JSON and exit
           -h, --help       Show this help
 
         Environment:
@@ -77,7 +81,7 @@ def parse_args(argv)
     end
   end
 
-  { require_tags: require_tags, json_output: json_output }
+  { require_tags: require_tags, json_output: json_output, list_current: list_current }
 end
 
 RepoReport = Struct.new(
@@ -195,6 +199,46 @@ def sorted_tags_for_ref(repo_dir, ref)
 end
 
 
+def current_release_listing
+  rubocop_ruby_repos = REPOS.grep(/\Arubocop-ruby/)
+
+  rubocop_ruby = rubocop_ruby_repos.to_h do |repo|
+    repo_dir = WORKSPACE_DIR.join(repo)
+    tag = latest_tag(repo_dir)
+
+    [
+      repo,
+      {
+        branch: "main",
+        version: tag&.delete_prefix("v"),
+        tag: tag
+      }
+    ]
+  end
+
+  lts_dir = WORKSPACE_DIR.join("rubocop-lts")
+  rubocop_lts = RUBOCOP_LTS_BRANCHES.reject { |branch, _wrapper| branch == "main" }.to_h do |branch, wrapper_repo|
+    _stdout, _stderr, exists = safe_cmd("git", "rev-parse", "--verify", branch, chdir: lts_dir)
+    tag = exists ? sorted_tags_for_ref(lts_dir, branch).last : nil
+
+    [
+      branch,
+      {
+        wrapper: wrapper_repo,
+        version: tag&.delete_prefix("v"),
+        tag: tag
+      }
+    ]
+  end
+
+  {
+    workspace: WORKSPACE_DIR.to_s,
+    rubocop_ruby: rubocop_ruby,
+    rubocop_lts: rubocop_lts
+  }
+end
+
+
 def build_repo_report(repo)
   repo_dir = WORKSPACE_DIR.join(repo)
   tags = sorted_tags(repo_dir)
@@ -298,6 +342,11 @@ end
 args = parse_args(ARGV)
 require_tags = args.fetch(:require_tags)
 json_output = args.fetch(:json_output)
+
+if args.fetch(:list_current)
+  puts JSON.pretty_generate(current_release_listing)
+  exit 0
+end
 
 reports = REPOS.to_h { |repo| [repo, build_repo_report(repo)] }
 
