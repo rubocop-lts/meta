@@ -148,6 +148,18 @@ Machine-readable output:
 meta/scripts/release_bump_plan.rb --json > tmp/release_bump_plan.json
 ```
 
+Released-version listing:
+
+```shell
+meta/scripts/release_bump_plan.rb --list-current > tmp/current_releases.json
+```
+
+`--list-current` emits JSON and exits with status `0`. It maps each
+`rubocop-rubyN_N` repository to its `main` branch release tag and maps each
+even `rubocop-lts` branch to its release tag and wrapper gem. This export is
+for release tooling that needs the published version graph without running the
+policy audit.
+
 Strict tag mode:
 
 ```shell
